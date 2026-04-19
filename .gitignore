@@ -1,0 +1,4 @@
+enetsender
+enetsender.exe
+*.test
+coverage.out
