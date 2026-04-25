@@ -23,7 +23,8 @@ func SunriseSunset(date time.Time, lat, lon float64) (sunrise, sunset time.Time)
 	jd := julianDay(y, int(m), d)
 
 	// Solar noon
-	n := math.Floor(jd - 2451545.0 + 0.0008)
+	// +0.5 converts midnight JD to noon JD (algorithm expects Julian Day Number at noon)
+	n := math.Floor(jd - 2451545.0 + 0.5 + 0.0008)
 	jStar := n - lon/360.0
 	M := math.Mod(357.5291+0.98560028*jStar, 360)
 	C := 1.9148*math.Sin(toRad(M)) + 0.0200*math.Sin(toRad(2*M)) + 0.0003*math.Sin(toRad(3*M))

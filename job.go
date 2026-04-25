@@ -22,8 +22,9 @@ func NewJob(name string, t time.Time, action func(), ignoreOnWeekends bool) *Job
 		Action:           action,
 		IgnoreOnWeekends: ignoreOnWeekends,
 	}
-	if t.Before(time.Now()) {
-		LogNormal(fmt.Sprintf("[Job] %s already past (%s), skipping", name, t.Format("15:04:05")))
+	now := time.Now()
+	if t.Before(now) {
+		LogNormal(fmt.Sprintf("[Job] %s already past (%s, now=%s), skipping", name, t.Format("15:04:05"), now.Format("15:04:05")))
 		j.DoneForToday = true
 	}
 	return j

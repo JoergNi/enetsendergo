@@ -31,10 +31,9 @@ const hotThresholdCelsius = 24
 func main() {
 	loc, err := time.LoadLocation("Europe/Berlin")
 	if err != nil {
-		fmt.Println("Warning: could not load Europe/Berlin timezone:", err)
-	} else {
-		time.Local = loc
+		panic("could not load Europe/Berlin timezone: " + err.Error())
 	}
+	time.Local = loc
 
 	host := GetConfig("enet_host", "ENET_HOST", "192.168.178.34")
 	port := 9050
@@ -137,6 +136,7 @@ func weatherFetchLoop() {
 }
 
 func runScheduler() {
+	waitForNTPSync()
 	for {
 		if lastInitTime.Day() != time.Now().Day() || lastInitTime.IsZero() {
 			initialize()
@@ -214,18 +214,18 @@ func refreshChannel(thing *Thing) {
 	}
 }
 
-func minTime(a time.Time, hour float64) time.Time {
-	b := time.Date(a.Year(), a.Month(), a.Day(), 0, 0, 0, 0, a.Location()).Add(
-		time.Duration(hour * float64(time.Hour)))
+// minTime returns the earlier of a and today+hour. today must be midnight of the current day.
+func minTime(a time.Time, today time.Time, hour float64) time.Time {
+	b := today.Add(time.Duration(hour * float64(time.Hour)))
 	if a.Before(b) {
 		return a
 	}
 	return b
 }
 
-func maxTime(a time.Time, hour float64) time.Time {
-	b := time.Date(a.Year(), a.Month(), a.Day(), 0, 0, 0, 0, a.Location()).Add(
-		time.Duration(hour * float64(time.Hour)))
+// maxTime returns the later of a and today+hour. today must be midnight of the current day.
+func maxTime(a time.Time, today time.Time, hour float64) time.Time {
+	b := today.Add(time.Duration(hour * float64(time.Hour)))
 	if a.After(b) {
 		return a
 	}
@@ -234,22 +234,24 @@ func maxTime(a time.Time, hour float64) time.Time {
 
 func initialize() {
 	lastInitTime = time.Now()
+	today := time.Date(lastInitTime.Year(), lastInitTime.Month(), lastInitTime.Day(), 0, 0, 0, 0, lastInitTime.Location())
+	LogNormal(fmt.Sprintf("initialize: time is %s (today=%s)", lastInitTime.Format("15:04:05"), today.Format("2006-01-02")))
 	sunrise, sunset := SunriseSunset(lastInitTime, sunLat, sunLon)
 	LogNormal(fmt.Sprintf("sunrise=%s sunset=%s", sunrise.Format("15:04"), sunset.Format("15:04")))
 
 	newJobs := make([]*Job, 0, 20)
 
-	newJobs = append(newJobs, NewJob("OfficeGarage+Street down", minTime(sunset.Add(10*time.Minute), 20), func() {
+	newJobs = append(newJobs, NewJob("OfficeGarage+Street down", minTime(sunset.Add(10*time.Minute), today, 20), func() {
 		Registry.OfficeGarage.MoveDown()
 		Registry.OfficeStreet.MoveDown()
 	}, false))
 
-	newJobs = append(newJobs, NewJob("OfficeGarage+Street up", maxTime(sunrise.Add(10*time.Minute), 8.25), func() {
+	newJobs = append(newJobs, NewJob("OfficeGarage+Street up", maxTime(sunrise.Add(10*time.Minute), today, 8.25), func() {
 		Registry.OfficeGarage.MoveUp()
 		Registry.OfficeStreet.MoveUp()
 	}, false))
 
-	newJobs = append(newJobs, NewJob("Kitchen+DiningRoom down", minTime(sunset.Add(8*time.Minute), 22), func() {
+	newJobs = append(newJobs, NewJob("Kitchen+DiningRoom down", minTime(sunset.Add(8*time.Minute), today, 22), func() {
 		Registry.Kitchen.MoveDown()
 		Registry.DiningRoom.MoveDown()
 		time.Sleep(1 * time.Second)
@@ -257,7 +259,7 @@ func initialize() {
 		Registry.DiningRoom.MoveDown()
 	}, false))
 
-	newJobs = append(newJobs, NewJob("Kitchen+DiningRoom up", maxTime(sunrise.Add(8*time.Minute), 7.45), func() {
+	newJobs = append(newJobs, NewJob("Kitchen+DiningRoom up", maxTime(sunrise.Add(8*time.Minute), today, 7.45), func() {
 		Registry.Kitchen.MoveUp()
 		time.Sleep(1 * time.Second)
 		Registry.DiningRoom.MoveUp()
@@ -266,32 +268,31 @@ func initialize() {
 		Registry.DiningRoom.MoveUp()
 	}, false))
 
-	newJobs = append(newJobs, NewJob("SleepingRoom down", minTime(sunset, 22), func() {
+	newJobs = append(newJobs, NewJob("SleepingRoom down", minTime(sunset, today, 22), func() {
 		Registry.SleepingRoom.MoveDown()
 	}, false))
 
-	newJobs = append(newJobs, NewJob("PaulsRoom down", minTime(sunset.Add(2*time.Minute), 22), func() {
+	newJobs = append(newJobs, NewJob("PaulsRoom down", minTime(sunset.Add(2*time.Minute), today, 22), func() {
 		Registry.PaulsRoom.MoveDown()
 	}, false))
 
-	newJobs = append(newJobs, NewJob("LeasRoom down", minTime(sunset.Add(1*time.Minute), 22), func() {
+	newJobs = append(newJobs, NewJob("LeasRoom down", minTime(sunset.Add(1*time.Minute), today, 22), func() {
 		Registry.LeasRoom.MoveDown()
 	}, false))
 
-	today := time.Date(lastInitTime.Year(), lastInitTime.Month(), lastInitTime.Day(), 0, 0, 0, 0, lastInitTime.Location())
 	newJobs = append(newJobs, NewJob("LeasRoom up", today.Add(9*time.Hour), func() {
 		Registry.LeasRoom.MoveUp()
 	}, false))
 
-	newJobs = append(newJobs, NewJob("RaffstoreLiving down", minTime(sunset.Add(4*time.Minute), 23), func() {
+	newJobs = append(newJobs, NewJob("RaffstoreLiving down", minTime(sunset.Add(4*time.Minute), today, 23), func() {
 		Registry.RaffstoreLiving.MoveDown()
 	}, false))
 
-	newJobs = append(newJobs, NewJob("RaffstoreDining down", minTime(sunset.Add(3*time.Minute), 22), func() {
+	newJobs = append(newJobs, NewJob("RaffstoreDining down", minTime(sunset.Add(3*time.Minute), today, 22), func() {
 		Registry.RaffstoreDining.MoveDown()
 	}, false))
 
-	newJobs = append(newJobs, NewJob("RaffstoreDining+Living up", maxTime(sunrise.Add(10*time.Minute), 10), func() {
+	newJobs = append(newJobs, NewJob("RaffstoreDining+Living up", maxTime(sunrise.Add(10*time.Minute), today, 10), func() {
 		Registry.RaffstoreDining.MoveUp()
 		Registry.RaffstoreLiving.MoveUp()
 	}, false))
@@ -405,25 +406,29 @@ func startHTTPServer() {
 	})
 
 	mux.HandleFunc("/things", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/things" {
-			type thingResponse struct {
-				Channel int        `json:"channel"`
-				Name    string     `json:"name"`
-				Type    ThingType  `json:"type"`
-				State   *ThingState `json:"state"`
-			}
-			var result []thingResponse
-			for _, t := range Registry.All {
-				s, _ := StateCache.Get(t.Channel)
-				result = append(result, thingResponse{
-					Channel: t.Channel, Name: t.Name, Type: t.Type, State: s,
-				})
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(result)
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		// Route: /things/{channel}/{action}[/{value}]
+		type thingResponse struct {
+			Channel int         `json:"channel"`
+			Name    string      `json:"name"`
+			Type    ThingType   `json:"type"`
+			State   *ThingState `json:"state"`
+		}
+		var result []thingResponse
+		for _, t := range Registry.All {
+			s, _ := StateCache.Get(t.Channel)
+			result = append(result, thingResponse{
+				Channel: t.Channel, Name: t.Name, Type: t.Type, State: s,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	})
+
+	// Route: /things/{channel}/{action}[/{value}]
+	mux.HandleFunc("/things/", func(w http.ResponseWriter, r *http.Request) {
 		handleThingAction(w, r)
 	})
 
