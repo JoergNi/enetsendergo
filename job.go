@@ -55,6 +55,7 @@ var (
 	debugLog      []string
 	debugLogMu    sync.Mutex
 	debugLogMax   = 10000
+	axiomWriter   *axiomBatchWriter
 )
 
 func LogNormal(message string) {
@@ -63,6 +64,9 @@ func LogNormal(message string) {
 	normalLogMu.Lock()
 	normalLog = append(normalLog, line)
 	normalLogMu.Unlock()
+	if axiomWriter != nil {
+		axiomWriter.Write([]byte(line)) //nolint:errcheck
+	}
 }
 
 func LogDebug(message string) {

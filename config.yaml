@@ -1,6 +1,6 @@
 name: "eNet Sender Go"
 description: "Bridges eNet smart home bus to a REST API for Home Assistant (Go)"
-version: "2.0.6"
+version: "2.0.7"
 slug: "enetsender"
 image: "ghcr.io/joergni/enetsender"
 init: false
@@ -17,6 +17,10 @@ ports_description:
 options:
   enet_host: "192.168.178.34"
   enet_port: 9050
+  axiom_dataset: ""
+  axiom_api_token: ""
 schema:
   enet_host: str
   enet_port: int
+  axiom_dataset: "str?"
+  axiom_api_token: "str?"
