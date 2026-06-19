@@ -14,7 +14,8 @@ import (
 )
 
 var (
-	version       = "dev" // overridden by -ldflags "-X main.version=..."
+	version       = "dev"     // overridden by -ldflags "-X main.version=..."
+	gitCommit     = "unknown" // overridden by -ldflags "-X main.gitCommit=..."
 	lastInitTime  time.Time
 	jobs          []*Job
 	jobsMu        sync.Mutex
@@ -54,7 +55,7 @@ func main() {
 	}
 
 	OnCommandFailed = func(msg string) { LogNormal("[FAIL] " + msg) }
-	LogNormal(fmt.Sprintf("[START] eNet Sender %s starting", version))
+	LogNormal(fmt.Sprintf("[START] eNet Sender %s (commit=%s) starting", version, gitCommit))
 	if axiomWriter != nil {
 		LogNormal(fmt.Sprintf("[START] Axiom logging enabled (dataset=%s)", axiomDataset))
 	}
@@ -244,6 +245,17 @@ func maxTime(a time.Time, today time.Time, hour float64) time.Time {
 	return b
 }
 
+// Temporary override through 2026-06-22: living-room raffstores must not move up before 16:00 local time.
+func livingRoomRaffstoresUpTime(now time.Time, today time.Time, sunrise time.Time) time.Time {
+	currentDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	cutoffDate := time.Date(2026, time.June, 22, 0, 0, 0, 0, now.Location())
+	earliestHour := 10.0
+	if !currentDate.After(cutoffDate) {
+		earliestHour = 16
+	}
+	return maxTime(sunrise.Add(10*time.Minute), today, earliestHour)
+}
+
 func initialize() {
 	lastInitTime = time.Now()
 	today := time.Date(lastInitTime.Year(), lastInitTime.Month(), lastInitTime.Day(), 0, 0, 0, 0, lastInitTime.Location())
@@ -304,7 +316,7 @@ func initialize() {
 		Registry.RaffstoreDining.MoveDown()
 	}, false))
 
-	newJobs = append(newJobs, NewJob("RaffstoreDining+Living up", maxTime(sunrise.Add(10*time.Minute), today, 10), func() {
+	newJobs = append(newJobs, NewJob("RaffstoreDining+Living up", livingRoomRaffstoresUpTime(lastInitTime, today, sunrise), func() {
 		Registry.RaffstoreDining.MoveUp()
 		Registry.RaffstoreLiving.MoveUp()
 	}, false))

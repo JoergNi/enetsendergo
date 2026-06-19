@@ -27,7 +27,7 @@
 # -- Git commit message behavior ----------------------------------------------
 # This script requires -CommitMessage. There is no interactive prompt.
 # AI agents must pass -CommitMessage explicitly, using a concise summary of the
-# code they changed, e.g. .\deploy_enet.ps1 -CommitMessage "Fix scheduler drift".
+# release snapshot they are creating, e.g. .\deploy_enet.ps1 -CommitMessage "Fix scheduler drift".
 
 param(
     [string]$CommitMessage
@@ -46,6 +46,9 @@ $BinaryPath = Join-Path $RepoRoot "enetsender"
 $Slug = "local_enetsender"
 $Remote = "/addons/local/enetsender"
 $Image = "ghcr.io/joergni/enetsender"
+$SshKey = "$env:USERPROFILE\.ssh\homevibeportal"
+$SshHost = "root@192.168.178.47"
+$SshPort = "22222"
 
 function GetGitRepoRoot([string]$Path) {
     $root = & git -C $Path rev-parse --show-toplevel 2>$null
@@ -59,7 +62,12 @@ function TestHasPendingGitChanges([string]$RepoPath) {
     return [bool]($status | Select-Object -First 1)
 }
 
-function PushToGitHub([string]$RepoPath, [string]$CommitMessage) {
+function TestGitHasUpstream([string]$RepoPath) {
+    & git -C $RepoPath rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 1>$null 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function CommitReleaseSnapshot([string]$RepoPath, [string]$CommitMessage) {
     $resolvedRepoRoot = GetGitRepoRoot $RepoPath
 
     Push-Location $resolvedRepoRoot
@@ -70,17 +78,16 @@ function PushToGitHub([string]$RepoPath, [string]$CommitMessage) {
         & git diff --cached --quiet
         if ($LASTEXITCODE -gt 1) { throw "git diff --cached failed" }
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "  no git changes to commit"
-            return
+            throw "no git changes to commit after version bump"
         }
 
-        & git commit -m $CommitMessage
+        & git commit -m $CommitMessage | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "git commit failed" }
 
-        & git push
-        if ($LASTEXITCODE -ne 0) { throw "git push failed" }
-
-        Write-Host "  GitHub push completed"
+        $revLines = & git rev-parse HEAD
+        if ($LASTEXITCODE -ne 0) { throw "git rev-parse failed" }
+        $releaseCommit = ($revLines | Select-Object -First 1).Trim()
+        return $releaseCommit
     }
     finally {
         Pop-Location
@@ -88,26 +95,69 @@ function PushToGitHub([string]$RepoPath, [string]$CommitMessage) {
 }
 
 $ResolvedRepoRoot = GetGitRepoRoot $RepoRoot
-$ShouldPushAfterDeploy = TestHasPendingGitChanges $ResolvedRepoRoot
-if ($ShouldPushAfterDeploy) {
-    Write-Host "  git changes detected before version bump; deploy will push after verification"
-} else {
-    Write-Host "  no pending git changes before version bump; deploy will skip git push"
+
+function InvokeHaSsh([string]$Command) {
+    & ssh.exe -i $SshKey -p $SshPort -o StrictHostKeyChecking=no -o ConnectTimeout=10 `
+        -o MACs=hmac-sha2-256-etm@openssh.com $SshHost $Command
+}
+
+function InvokeHaScript([string]$Script) {
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Script))
+    InvokeHaSsh "printf '%s' '$encoded' | base64 -d | sh"
+}
+
+function InvokeHaSupervisor([string]$Command) {
+    InvokeHaScript @"
+export SUPERVISOR_TOKEN=`$(cat /run/s6/container_environment/SUPERVISOR_TOKEN)
+$Command
+"@
+}
+
+function CopyToHa([string]$LocalPath, [string]$RemotePath) {
+    & scp.exe -i $SshKey -P $SshPort -o StrictHostKeyChecking=no -o ConnectTimeout=10 `
+        -o MACs=hmac-sha2-256-etm@openssh.com $LocalPath "${SshHost}:${RemotePath}"
+}
+
+function AssertAddonIsNotDetached() {
+    $appInfoLines = @(InvokeHaSupervisor "ha apps info $Slug")
+    if ($LASTEXITCODE -ne 0) { throw "ha apps info failed for $Slug" }
+    $appInfo = $appInfoLines -join "`n"
+    $detachedMatch = [regex]::Match($appInfo, '(?m)^detached:\s*(.+)$')
+    if (-not $detachedMatch.Success) {
+        throw "Could not determine detached state for $Slug"
+    }
+
+    $detached = $detachedMatch.Groups[1].Value.Trim()
+    if ($detached -eq "true") {
+        throw "Add-on $Slug is detached in Home Assistant. Reattach or reinstall it from the local repository before using deploy_enet.ps1. Detached add-ons do not pick up config.yaml version changes via store reload/apps update."
+    }
 }
 
 function SetWatchdog([bool]$on) {
     $val = if ($on) { "true" } else { "false" }
-    $sh = "#!/bin/sh`nTOKEN=`$(cat /run/s6/container_environment/SUPERVISOR_TOKEN)`ncurl -s -X POST -H `"Authorization: Bearer `$TOKEN`" -H `"Content-Type: application/json`" -d '{`"watchdog`": $val}' http://supervisor/addons/$Slug/options"
-    $bytes = [System.Text.Encoding]::ASCII.GetBytes($sh)
-    [System.IO.File]::WriteAllBytes((Join-Path (Get-Location).Path "watchdog_tmp.sh"), $bytes)
-    bash -c "bash hassh 'sh -s' < watchdog_tmp.sh"
-    Remove-Item "watchdog_tmp.sh"
+    $script = @'
+TOKEN=$(cat /run/s6/container_environment/SUPERVISOR_TOKEN); curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{{"watchdog": {0}}}' http://supervisor/addons/{1}/options
+'@ -f $val, $Slug
+    InvokeHaScript $script | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "watchdog update failed" }
 }
 
-# 1. Bump version (always increments patch)
+# 0. Preflight: refuse to deploy against a detached add-on
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 function Step([string]$s) { Write-Host "$s  +$([int]$sw.Elapsed.TotalSeconds)s" }
-Step "[1/5] version"
+Step "[0/6] preflight"
+AssertAddonIsNotDetached
+
+# 1. Unit tests
+Step "[1/6] test"
+Push-Location $ResolvedRepoRoot
+& "C:\Program Files\Go\bin\go.exe" test ./...
+$testExit = $LASTEXITCODE
+Pop-Location
+if ($testExit -ne 0) { throw "Tests failed" }
+
+# 2. Bump version
+Step "[2/6] version"
 $configText = Get-Content $ConfigPath -Raw
 $current = [regex]::Match($configText, 'version: "([^"]+)"').Groups[1].Value
 $p = $current.Split('.')
@@ -117,21 +167,18 @@ Write-Host "  $current -> $NewVersion"
 ($configText -replace "version: `"$current`"", "version: `"$NewVersion`"") |
     Set-Content $ConfigPath -NoNewline
 
-# 2. Test
-Step "[2/5] test"
-Push-Location $ResolvedRepoRoot
-& "C:\Program Files\Go\bin\go.exe" test ./...
-$testExit = $LASTEXITCODE
-Pop-Location
-if ($testExit -ne 0) { throw "Tests failed" }
+# 3. Commit the release snapshot
+Step "[3/6] commit"
+$GitCommit = CommitReleaseSnapshot $ResolvedRepoRoot $CommitMessage
+Write-Host "  committed release snapshot: $GitCommit"
 
-# 3. Build linux-arm64 static binary
-Step "[3/5] build"
+# 4. Build linux-arm64 static binary
+Step "[4/6] build"
 $env:GOOS = "linux"
 $env:GOARCH = "arm64"
 $env:CGO_ENABLED = "0"
 Push-Location $ResolvedRepoRoot
-& "C:\Program Files\Go\bin\go.exe" build -ldflags "-X main.version=$NewVersion" -o $BinaryPath ./...
+& "C:\Program Files\Go\bin\go.exe" build -ldflags "-X main.version=$NewVersion -X main.gitCommit=$GitCommit" -o $BinaryPath ./...
 $buildExit = $LASTEXITCODE
 Pop-Location
 $env:GOOS = $null
@@ -139,10 +186,10 @@ $env:GOARCH = $null
 $env:CGO_ENABLED = $null
 if ($buildExit -ne 0) { throw "Build failed" }
 
-# 4. Build Docker image on PC and push to ghcr.io
+# 5. Build Docker image on PC and push to ghcr.io
 # The supervisor will pull this image directly -- no build on the Pi.
 # The package must be public on ghcr.io so the Pi can pull without credentials.
-Step "[4/5] push"
+Step "[5/6] push"
 $dockerReady = $false
 for ($d = 0; $d -lt 24; $d++) {
     & { $ErrorActionPreference = "SilentlyContinue"; docker info 2>&1 | Out-Null }
@@ -160,22 +207,25 @@ docker buildx build --platform linux/arm64 --push -t "${Image}:${NewVersion}" $R
 if ($LASTEXITCODE -ne 0) { throw "Docker push failed" }
 Write-Host "  pushed ${Image}:${NewVersion}"
 
-# 5. Deploy: upload config.yaml to Pi, reload store, update add-on
+# 6. Deploy: upload config.yaml to Pi, reload store, update add-on
 # Only config.yaml is needed -- no Dockerfile or binary required on the Pi
 # when image: is set in config.yaml.
-Step "[5/5] deploy"
+Step "[6/6] deploy"
 SetWatchdog $false
 Write-Host "  watchdog disabled"
 
-bash -c "bash hassh 'sudo mkdir -p $Remote'"
+InvokeHaSsh "sudo mkdir -p $Remote"
 if ($LASTEXITCODE -ne 0) { throw "mkdir failed" }
-$configLocal = ($ConfigPath -replace '\\','/')
-bash -c "bash hassh 'sudo tee $Remote/config.yaml > /dev/null' < '$configLocal'"
+CopyToHa $ConfigPath "/tmp/enetsender_config.yaml"
+if ($LASTEXITCODE -ne 0) { throw "config upload failed" }
+InvokeHaScript @"
+sudo mv /tmp/enetsender_config.yaml $Remote/config.yaml
+"@
 if ($LASTEXITCODE -ne 0) { throw "config upload failed" }
 
 $reloadOk = $false
 for ($r = 0; $r -lt 3; $r++) {
-    bash -c "bash hassh 'SUPERVISOR_TOKEN=`$(cat /run/s6/container_environment/SUPERVISOR_TOKEN) ha store reload'"
+    InvokeHaSupervisor "ha store reload"
     if ($LASTEXITCODE -eq 0) { $reloadOk = $true; break }
     Write-Host "  store reload attempt $($r+1) failed, retrying..."
     Start-Sleep 5
@@ -185,7 +235,7 @@ if (-not $reloadOk) { Write-Host "  store reload failed after 3 attempts - conti
 $updateOk = $false
 for ($r = 0; $r -lt 3; $r++) {
     Start-Sleep 3
-    bash -c "bash hassh 'SUPERVISOR_TOKEN=`$(cat /run/s6/container_environment/SUPERVISOR_TOKEN) ha apps update $Slug 2>&1'"
+    InvokeHaSupervisor "ha apps update $Slug 2>&1"
     if ($LASTEXITCODE -eq 0) { $updateOk = $true; break }
     Write-Host "  update attempt $($r+1) failed, retrying..."
     Start-Sleep 10
@@ -199,7 +249,7 @@ Write-Host "  update triggered"
 $started = $false
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep 5
-    $info = bash -c "bash hassh 'SUPERVISOR_TOKEN=`$(cat /run/s6/container_environment/SUPERVISOR_TOKEN) ha apps info $Slug 2>/dev/null | grep state'"
+    $info = InvokeHaSupervisor "ha apps info $Slug 2>/dev/null | grep state"
     Write-Host "  $info"
     if ($info -match "state: started") { $started = $true; break }
 }
@@ -210,22 +260,34 @@ if (-not $started) {
 SetWatchdog $true
 Write-Host "  watchdog re-enabled"
 
-$here = (Get-Location).Path
-$verifySh = "#!/bin/sh`nTOKEN=`$(cat /run/s6/container_environment/SUPERVISOR_TOKEN)`ncurl -s -H `"Authorization: Bearer `$TOKEN`" http://supervisor/addons/$Slug/logs | grep eNet"
-$bytes = [System.Text.Encoding]::ASCII.GetBytes($verifySh)
-[System.IO.File]::WriteAllBytes((Join-Path $here "verify_tmp.sh"), $bytes)
-$startupLog = bash -c "bash hassh 'sh -s' < verify_tmp.sh"
-Remove-Item "verify_tmp.sh"
-Write-Host "  startup: $startupLog"
+$appInfoLines = @(InvokeHaSupervisor "ha apps info $Slug")
+$appInfo = $appInfoLines -join "`n"
+$versionMatch = [regex]::Match($appInfo, '(?m)^version:\s*(.+)$')
+$stateMatch = [regex]::Match($appInfo, '(?m)^state:\s*(.+)$')
+$deployedVersion = if ($versionMatch.Success) { $versionMatch.Groups[1].Value.Trim() } else { "unknown" }
+$deployedState = if ($stateMatch.Success) { $stateMatch.Groups[1].Value.Trim() } else { "unknown" }
+Write-Host "  deployed version: $deployedVersion"
+Write-Host "  deployed state: $deployedState"
 
-if ($ShouldPushAfterDeploy) {
-    PushToGitHub $ResolvedRepoRoot $CommitMessage
-} else {
-    Write-Host "  skipping git push because the version bump was the only change"
-}
+$recentLogs = InvokeHaSupervisor "ha apps logs $Slug | tail -n 10"
+Write-Host "  recent logs:`n$recentLogs"
 
-if ($startupLog -match [regex]::Escape($NewVersion)) {
-    Write-Host "OK: v$NewVersion confirmed in startup log"
+if ($deployedVersion -eq $NewVersion -and $deployedState -eq "started") {
+    Write-Host "  verified: $Slug v$deployedVersion is started"
+    if (TestGitHasUpstream $ResolvedRepoRoot) {
+        Push-Location $ResolvedRepoRoot
+        try {
+            & git push
+            if ($LASTEXITCODE -ne 0) { throw "git push failed" }
+        }
+        finally {
+            Pop-Location
+        }
+        Write-Host "  GitHub push completed"
+    } else {
+        Write-Host "  skipping git push because no upstream is configured"
+    }
+    Write-Host "OK: v$NewVersion deployed and started"
 } else {
-    Write-Host "WARNING: v$NewVersion not in startup log - check manually"
+    throw "Post-deploy verification failed: expected v$NewVersion started, got version=$deployedVersion state=$deployedState"
 }
