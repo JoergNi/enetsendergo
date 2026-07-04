@@ -1,6 +1,6 @@
 name: "eNet Sender Go"
 description: "Bridges eNet smart home bus to a REST API for Home Assistant (Go)"
-version: "2.0.11"
+version: "2.0.12"
 slug: "enetsender"
 image: "ghcr.io/joergni/enetsender"
 init: false

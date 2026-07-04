@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "time/tzdata"
@@ -21,6 +22,8 @@ var (
 	jobsMu        sync.Mutex
 	dailyHighTemp *float64
 	weather       *WeatherService
+
+	schedulerWaitingNTP atomic.Bool
 
 	firmwareVersion = "unknown"
 	hardwareVersion = "unknown"
@@ -124,8 +127,12 @@ func logThingStates() {
 func heartbeatLoop() {
 	for {
 		time.Sleep(60 * time.Second)
-		LogNormal(fmt.Sprintf("heartbeat - things=%d lastInit=%s jobs=%d",
-			len(Registry.All), lastInitTime.Format("15:04:05"), len(jobs)))
+		suffix := ""
+		if schedulerWaitingNTP.Load() {
+			suffix = " scheduler=waiting-for-ntp-sync"
+		}
+		LogNormal(fmt.Sprintf("heartbeat - things=%d lastInit=%s jobs=%d%s",
+			len(Registry.All), lastInitTime.Format("15:04:05"), len(jobs), suffix))
 	}
 }
 
@@ -149,7 +156,9 @@ func weatherFetchLoop() {
 }
 
 func runScheduler() {
+	schedulerWaitingNTP.Store(true)
 	waitForNTPSync()
+	schedulerWaitingNTP.Store(false)
 	for {
 		if lastInitTime.Day() != time.Now().Day() || lastInitTime.IsZero() {
 			initialize()
@@ -407,8 +416,14 @@ func startHTTPServer() {
 			})
 		}
 
+		schedulerStatus := "running"
+		if schedulerWaitingNTP.Load() {
+			schedulerStatus = "waiting_for_ntp_sync"
+		}
+
 		result := map[string]interface{}{
-			"addonVersion": version,
+			"addonVersion":    version,
+			"schedulerStatus": schedulerStatus,
 			"firmware":     firmwareVersion,
 			"hardware":     hardwareVersion,
 			"enet":         enetVersion,
