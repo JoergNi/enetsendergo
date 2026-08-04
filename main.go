@@ -254,12 +254,13 @@ func maxTime(a time.Time, today time.Time, hour float64) time.Time {
 	return b
 }
 
-// Temporary override through 2026-06-22: living-room raffstores must not move up before 16:00 local time.
+// Vacation override 2026-08-08 through 2026-08-22: living-room raffstores must not move up before 16:00 local time.
 func livingRoomRaffstoresUpTime(now time.Time, today time.Time, sunrise time.Time) time.Time {
 	currentDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	cutoffDate := time.Date(2026, time.June, 22, 0, 0, 0, 0, now.Location())
+	startDate := time.Date(2026, time.August, 8, 0, 0, 0, 0, now.Location())
+	endDate := time.Date(2026, time.August, 22, 0, 0, 0, 0, now.Location())
 	earliestHour := 10.0
-	if !currentDate.After(cutoffDate) {
+	if !currentDate.Before(startDate) && !currentDate.After(endDate) {
 		earliestHour = 16
 	}
 	return maxTime(sunrise.Add(10*time.Minute), today, earliestHour)
